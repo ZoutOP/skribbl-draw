@@ -1,9 +1,72 @@
+from PyQt5.QtCore import QThread, pyqtSignal
 import mouse
 import random
 
-class StrokeDrawing:
+
+class MouseControl:
+
+    def click(self):
+        pass
+
+    def move(self, x, y, duration):
+        pass
+
+    def press(self, x, y):
+        pass
+
+    def release(self, x, y):
+        pass
+
+
+class RootMouse(MouseControl):
 
     def __init__(self):
+        super().__init__()
+        import mouse
+        self._m = mouse
+    
+    def click(self):
+        self._m.click()
+
+    def move(self, x, y, duration: int = None):
+        self._m.move(x, y, True, 0 if duration is None else duration / 1000)
+    
+    def press(self):
+        self._m.press()
+
+    def release(self):
+        self._m.release()
+
+
+class PyAutoMouse(MouseControl):
+
+    def __init__(self):
+        super().__init__()
+        import pyautogui
+        self._m = pyautogui
+
+    def click(self):
+        self._m.click('left')
+
+    def move(self, x, y, duration: int = None):
+        self._m.moveTo(x + 2560, y, (0 if duration is None else duration / 1000))
+    
+    def press(self):
+        self._m.press('left')
+
+    def release(self):
+        self._m.mouseUp('left')
+
+
+class StrokeDrawing(QThread):
+
+    start_signal = pyqtSignal(int)
+    stop_signal = pyqtSignal()
+
+    progress_signal = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
         self._canvas = (0, 0, 0, 0)
         self._colours = {}
 
@@ -18,9 +81,14 @@ class StrokeDrawing:
         self._velocity = 100
         self._distance = 500
 
-    @property
-    def progress(self) -> str:
-        return f'Drawing {self._index}/{len(self._strokes)}'
+        self.mouse = PyAutoMouse()
+
+        self.start_signal.connect(self.start_drawing)
+        self.stop_signal.connect(self.stop_drawing)
+        self.update_progress()
+
+    def update_progress(self):
+        self.progress_signal.emit(f'Drawing {self._index}/{len(self._strokes)}')
 
     def reset(self):
         self._index = 0
@@ -52,6 +120,7 @@ class StrokeDrawing:
             return
         self._is_drawing = True
         self._velocity = velocity
+        self.update_progress()
         self.draw_loop()
 
     def draw(self):
@@ -76,9 +145,10 @@ class StrokeDrawing:
 
         distance = (((end[0] - start[0]) ** 2) + ((end[1] - start[1]) ** 2)) ** .5
         time = (distance / self._distance) * self._velocity
-        print('stroke line is: ', time)
 
         self.move_mouse(end, relative=True, duration=time)
+
+        self.update_progress()
 
         if not self._is_drawing:
             self.release_mouse()
@@ -95,8 +165,9 @@ class StrokeDrawing:
             self.draw()
         self.release_mouse()  # Just incase.
 
-    def stop(self):
+    def stop_drawing(self):
         self.release_mouse()
+        self.update_progress()
         
     def select_colour(self, colour):
         colour = tuple(colour)
@@ -116,21 +187,20 @@ class StrokeDrawing:
         self._active_colour = colour
         
     def mouse_click(self, x: int, y: int, relative: bool):
-        mouse.move(
+        self.mouse.move(
             self._canvas[0] + x if relative else x,
             self._canvas[1] + y if relative else y
         )
-        mouse.click()
+        self.mouse.click()
 
     def press_mouse(self):
         self._mouse_press = True
-        mouse.press()
+        self.mouse.press()
 
     def move_mouse(self, pos: tuple, duration = None, relative: bool = False):
-        mouse.move(
+        self.mouse.move(
             self._canvas[0] + pos[0] if relative else pos[0],
             self._canvas[1] + pos[1] if relative else pos[1],
-            True,
             0 if duration is None else duration / 1000
         )
 
@@ -138,5 +208,5 @@ class StrokeDrawing:
         if self._is_drawing:
             self._is_drawing = False
         else:
-            mouse.release()
+            self.mouse.release()
             self._mouse_press = False

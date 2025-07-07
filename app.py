@@ -91,9 +91,6 @@ class SnipOverlay(QWidget):
 
 class SimpleApp(QWidget):
 
-    start_loop = pyqtSignal()
-    stop_loop = pyqtSignal()
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Skribble drawer.")
@@ -150,10 +147,9 @@ class SimpleApp(QWidget):
         self._data = None
         self._image = None
         self._drawing = StrokeDrawing()
+        self._drawing.progress_signal.connect(self.update_progress)
+        self._drawing.start()
 
-        self.start_loop.connect(self._start_draw)
-        self.stop_loop.connect(self._stop_draw)
-        
         self.listener = keyboard.Listener(on_press=self.on_key_press, on_release=self.on_key_release)
         self.listener.start()
 
@@ -163,26 +159,17 @@ class SimpleApp(QWidget):
         self.overlay.showFullScreen()
         self.overlay.activateWindow()
 
-    def _start_draw(self):
-        if not self._drawing._is_drawing:
-            print("Numpad - pressed, starting loop")
-            self._drawing.start_drawing(self.draw_delay_input.value())
-
-    def _stop_draw(self):
-        print("Numpad - released, stopping loop")
-        self._drawing.stop()
-
     def on_key_press(self, key):
         try:
             if key.char == '-':
-                self.start_loop.emit()
+                self._drawing.start_signal.emit(self.draw_delay_input.value())
         except:
             pass
 
     def on_key_release(self, key):
         try:
             if key.char == '-':
-                self.stop_loop.emit()
+                self._drawing.stop_signal.emit()
         except:
             pass
 
@@ -192,7 +179,6 @@ class SimpleApp(QWidget):
     def reset(self):
         print("Reset pressed.")
         self._drawing.reset()
-        self.update_progress()
 
     def paste_image(self):
         clipboard = QApplication.clipboard()
@@ -209,8 +195,8 @@ class SimpleApp(QWidget):
             self.image_label.setText("No image in clipboard")
             print("Clipboard does not contain an image.")
 
-    def update_progress(self):
-        self.progress_label.setText(self._drawing.progress)
+    def update_progress(self, progress: str):
+        self.progress_label.setText(progress)
 
     def _set_content(self, image: np.ndarray = None, data: tuple = None):
         if data is not None:
@@ -229,7 +215,6 @@ class SimpleApp(QWidget):
                     height=canvas[3] - canvas[1] - 50
             ), self.random_checkbox.isChecked())
             self._drawing.set_brush_size(self.brush_size_input.value())
-            self.update_progress()
 
 
 if __name__ == "__main__":
