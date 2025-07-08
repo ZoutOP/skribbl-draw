@@ -1,5 +1,6 @@
-from PyQt5.QtCore import QThread, pyqtSignal
-import mouse
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer, QObject, pyqtSlot
+from PyQt5.QtWidgets import QApplication
+from threading import Event
 import random
 
 
@@ -58,11 +59,11 @@ class PyAutoMouse(MouseControl):
         self._m.mouseUp('left')
 
 
-class StrokeDrawing(QThread):
+class StrokeDrawing(QObject):
 
-    start_signal = pyqtSignal(int)
-    stop_signal = pyqtSignal()
+    finished = pyqtSignal()
 
+    request_next_stroke = pyqtSignal(bool)
     progress_signal = pyqtSignal(str)
 
     def __init__(self):
@@ -74,62 +75,71 @@ class StrokeDrawing(QThread):
         self._index = 0
         self._stroke_index = 0
         self._active_colour = None
-        self._brush_size = 10
+        self._is_drawing = False
+        self._reset_flag = False
 
         self._mouse_press = False
-        self._is_drawing = False
         self._velocity = 100
-        self._distance = 500
+        self._distance = 100
 
-        self.mouse = PyAutoMouse()
+        self.mouse = RootMouse()
 
-        self.start_signal.connect(self.start_drawing)
-        self.stop_signal.connect(self.stop_drawing)
         self.update_progress()
 
     def update_progress(self):
         self.progress_signal.emit(f'Drawing {self._index}/{len(self._strokes)}')
-
-    def reset(self):
+    
+    def _reset(self):
         self._index = 0
         self._stroke_index = 0
         self._active_colour = None
+        self._reset_flag = False
 
-    def set_brush_size(self, size):
-        self._brush_size = size
+    @pyqtSlot()
+    def reset(self):
+        if self._is_drawing:
+            self._reset_flag = True
+            self._is_drawing = False
+        else:
+            self._reset()
 
-    def set_strokes(self, strokes: list, random_flag: bool):
+    @pyqtSlot(list)
+    def set_strokes(self, strokes: list):
+        if self._is_drawing:
+            return
         self._strokes = []
         for stroke in strokes:
             self._strokes.extend([
                 (stroke[0], polygon) for polygon in stroke[1]
             ])
-        if random_flag:
-            random.shuffle(self._strokes)
 
+    @pyqtSlot(tuple)
     def set_canvas(self, canvas_coords: tuple):
+        if self._is_drawing:
+            return
         self._canvas = canvas_coords
 
+    @pyqtSlot(list)
     def set_colours(self, colours: list):
+        if self._is_drawing:
+            return
         self._colours.clear()
         for colour in colours:
             self._colours[tuple(colour[0])] = colour[1]
 
-    def start_drawing(self, velocity: int):
-        if self._index >= len(self._strokes):
-            return
+    @pyqtSlot(int)
+    def draw(self, velocity: int):
+        """ Draw the stroke. """
         self._is_drawing = True
         self._velocity = velocity
         self.update_progress()
-        self.draw_loop()
-
-    def draw(self):
-        """ Draw the stroke. """
+        # Drawing loop.
         if self._index >= len(self._strokes):
             self._is_drawing = False
             self.release_mouse()
+            self.request_next_stroke.emit(False)
             return
-        
+
         colour, strokes = self._strokes[self._index]
         if self._active_colour is None or tuple(colour) != self._active_colour:
             self.select_colour(colour)
@@ -150,9 +160,6 @@ class StrokeDrawing(QThread):
 
         self.update_progress()
 
-        if not self._is_drawing:
-            self.release_mouse()
-
         if is_final_stroke:
             self._stroke_index = 0
             self._index += 1
@@ -160,14 +167,17 @@ class StrokeDrawing(QThread):
         else:
             self._stroke_index += 1
 
-    def draw_loop(self):
-        while self._is_drawing:
-            self.draw()
-        self.release_mouse()  # Just incase.
+        if self._is_drawing:
+            self.request_next_stroke.emit(True)
+        else:
+            self.release_mouse()
+            self.request_next_stroke.emit(False)
 
-    def stop_drawing(self):
+    @pyqtSlot()
+    def stop(self):
         self.release_mouse()
-        self.update_progress()
+        self._is_drawing = False
+        
         
     def select_colour(self, colour):
         colour = tuple(colour)
@@ -205,8 +215,5 @@ class StrokeDrawing(QThread):
         )
 
     def release_mouse(self):
-        if self._is_drawing:
-            self._is_drawing = False
-        else:
-            self.mouse.release()
-            self._mouse_press = False
+        self.mouse.release()
+        self._mouse_press = False

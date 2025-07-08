@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout,
     QFileDialog, QLabel, QCheckBox, QSpinBox, QHBoxLayout
 )
-from PyQt5.QtCore import Qt, QRect, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QRect, pyqtSignal, QTimer, QThread
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QGuiApplication, QImage
 
 from pynput import keyboard
@@ -91,6 +91,13 @@ class SnipOverlay(QWidget):
 
 class SimpleApp(QWidget):
 
+    set_drawing_strokes = pyqtSignal(list)
+    set_drawing_canvas = pyqtSignal(tuple)
+    set_drawing_colours = pyqtSignal(list)
+    reset_drawing = pyqtSignal()
+    draw = pyqtSignal(int)
+    stop_drawing = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Skribble drawer.")
@@ -146,30 +153,52 @@ class SimpleApp(QWidget):
 
         self._data = None
         self._image = None
+        self._thread = QThread()
         self._drawing = StrokeDrawing()
+        self._drawing.moveToThread(self._thread)
+        self._started = False
+        # Connect signals.
         self._drawing.progress_signal.connect(self.update_progress)
-        self._drawing.start()
+        self._drawing.request_next_stroke.connect(self.request_draw)
+        
+        self.set_drawing_canvas.connect(self._drawing.set_canvas)
+        self.set_drawing_colours.connect(self._drawing.set_colours)
+        self.set_drawing_strokes.connect(self._drawing.set_strokes)
+        self.reset_drawing.connect(self._drawing.reset)
+        self.draw.connect(self._drawing.draw)
+        self.stop_drawing.connect(self._drawing.stop)
 
         self.listener = keyboard.Listener(on_press=self.on_key_press, on_release=self.on_key_release)
         self.listener.start()
+        self._thread.start()
 
     def launch_snipper(self):
         self.overlay = SnipOverlay()
         self.overlay.region_selected.connect(self.on_canvas_found)
         self.overlay.showFullScreen()
         self.overlay.activateWindow()
+    
+    def request_draw(self, drawing: bool):
+        if self._started and drawing:
+            self.draw.emit(self.draw_delay_input.value())
+        elif not drawing:
+            self._started = False
 
     def on_key_press(self, key):
         try:
-            if key.char == '-':
-                self._drawing.start_signal.emit(self.draw_delay_input.value())
+            if key.char == '-' and not self._started:
+                print('start!')
+                self._started = True
+                self.request_draw(True)
         except:
             pass
 
     def on_key_release(self, key):
         try:
             if key.char == '-':
-                self._drawing.stop_signal.emit()
+                print('KEY RELEASED STOPPING!')
+                self.stop_drawing.emit()
+                self._started = False
         except:
             pass
 
@@ -177,8 +206,7 @@ class SimpleApp(QWidget):
         self._set_content(data=data)
 
     def reset(self):
-        print("Reset pressed.")
-        self._drawing.reset()
+        self.reset_drawing.emit()
 
     def paste_image(self):
         clipboard = QApplication.clipboard()
@@ -201,20 +229,29 @@ class SimpleApp(QWidget):
     def _set_content(self, image: np.ndarray = None, data: tuple = None):
         if data is not None:
             self._data = data
-            self._drawing.set_canvas(data[0])
-            self._drawing.set_colours(data[1])
+            self.set_drawing_canvas.emit(data[0])
+            self.set_drawing_colours.emit(data[1])
         if image is not None:
             self._image = image
         if self._data is not None and self._image is not None:
             canvas, colours = self._data
-            self._drawing.set_strokes(
+            self.set_drawing_strokes.emit(
                 create_brush_strokes(
                     self._image,
                     [colour[0] for colour in colours],
                     width=canvas[2] - canvas[0],
                     height=canvas[3] - canvas[1] - 50
-            ), self.random_checkbox.isChecked())
-            self._drawing.set_brush_size(self.brush_size_input.value())
+            )[:40])
+
+    def closeEvent(self, event):
+        # Optional: Stop thread cleanly on window close
+        if self._thread.isRunning():
+            print("Stopping thread...")
+            self._drawing.stop()
+            self._thread.quit()
+            self._thread.wait()  # Wait for thread to finish
+
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":

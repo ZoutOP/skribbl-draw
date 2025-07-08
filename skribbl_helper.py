@@ -1,16 +1,20 @@
+import time
+
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
-from scipy.spatial import KDTree
-from scipy.ndimage import binary_erosion
-from skimage.color import rgb2lab
 
+from scipy.spatial import KDTree
+from scipy import ndimage
+from skimage.color import rgb2lab
+from collections import Counter
 from PyQt5.QtGui import QImage
 
+from pathlib import Path
 
 COLOUR_X_START = 54
-COLOUR_HEIGHT = 23
-COLOUR_WIDTH = 23
+COLOUR_HEIGHT = 24
+COLOUR_WIDTH = 24
 NUM_COLOURS = 13
 
 
@@ -21,7 +25,7 @@ def get_colours(img: np.ndarray, x_offset, y_offset) -> list:
     """ Get all colours as a list of tuple. """
     colours = []
     for y in range(2):
-        for x in range(13):
+        for x in range(NUM_COLOURS):
             x1 = COLOUR_X_START + (x * COLOUR_WIDTH)
             x2 = COLOUR_X_START + ((x + 1) * COLOUR_WIDTH)
             y1 = img.shape[0] - ((y + 1) * COLOUR_HEIGHT)
@@ -80,7 +84,7 @@ def find_canvas(img: np.ndarray, x_offset: int, y_offset: int) -> tuple:
         else:
             break
 
-    Image.fromarray(img[top:bottom, left:right]).save('C:\\Users\\kevin\\OneDrive\\Documents\\Projects\\skribble\\canvas.jpeg')
+    Image.fromarray(img[top:bottom, left:right]).save('canvas.png')
     
     return (
         (x_offset + left, y_offset + top, x_offset + right, y_offset + bottom), 
@@ -177,7 +181,83 @@ def contours_to_polygons(mask: np.ndarray, epsilon_factor=0.01):
     return polygons
 
 
+def get_layered_blobs(image: np.ndarray, colours: list, scale: float = .5) -> Image.Image:
+    orig_h, orig_w, _ = image.shape
+    new_w = int(image.shape[1] * scale)
+    new_h = int(image.shape[0] * scale)
+    image = np.array(Image.fromarray(image).resize((new_w, new_h), Image.Resampling.NEAREST))
+
+    colour_map = {}
+    for colour in colours:
+        colour_map[tuple(colour)] = np.sum(np.all(image == colour, axis=-1))
+    
+    # copy image.
+    new_image = image.copy()
+    blobs = []
+    while len(colour_map) > 0:
+        # Find data with smallest colours.
+        colour = list(colour_map.keys())[0]
+        for pxl_colour, pxl_count in colour_map.items():
+            if pxl_count < colour_map[colour]:
+                colour = pxl_colour
+        # Remove smallest colour from map
+        count = colour_map.pop(colour)
+        if count == 0:
+            continue  # No calc
+        start = time.time()
+        # Step 1: Make mask of target color
+        mask = np.all(new_image == colour, axis=-1)
+        
+        # test
+        blob_image = np.zeros_like(image)
+        blob_image[mask] = colour
+        blobs.append((blob_image, mask, colour))
+        
+        # Step 2: Label connected regions (blobs) of the mask
+        labeled, num_blobs = ndimage.label(mask)
+
+        # Step 3: For each blob
+        for label in range(1, num_blobs + 1):
+            blob_mask = (labeled == label)
+
+            # Dilate the blob to find neighbors
+            dilated = ndimage.binary_dilation(blob_mask)
+            border_mask = dilated & ~blob_mask
+
+            # Get the coordinates of border pixels
+            yx = np.argwhere(border_mask)
+
+            # Get colors of border pixels
+            neighbor_colours = [tuple(new_image[y, x]) for y, x in yx]
+
+            # Remove target_color and transparent pixels
+            neighbor_colours = [c for c in neighbor_colours if c != colour]
+
+            if not neighbor_colours:
+                print('no replacement?')
+                continue  # nothing to replace with
+
+            # Step 4: Find the most common neighbor color
+            bg_colour = Counter(neighbor_colours).most_common(1)[0][0]
+
+            # Step 5: Replace the blob in the array
+            new_image[blob_mask] = bg_colour
+            colour_map[bg_colour] += np.sum(blob_mask)  # Add new pixel count to label.
+        print(f'iter {str(colour)} took {time.time() - start} seconds')
+
+    for p in Path('blobs').iterdir():
+        if p.suffix == '.png':
+            p.unlink()
+            
+    full_blob = np.zeros_like(image)
+    for i, blob_data in enumerate(reversed(blobs)):
+        blob, blob_mask, colour = blob_data
+        Image.fromarray(full_blob).resize((orig_w, orig_h)).save(f'blobs/{i}.png')
+        full_blob[blob_mask] = colour
+
+
 def image_to_polygons(image: np.ndarray, alpha: np.ndarray, palette: list[tuple]):
+    get_layered_blobs(image, palette)
     polygons = []
 
     for colour in palette:
@@ -188,21 +268,53 @@ def image_to_polygons(image: np.ndarray, alpha: np.ndarray, palette: list[tuple]
         if mask.sum() == 0:
             continue
         # Erode the mask: shrinks blobs inward
-        eroded = binary_erosion(mask)
+        eroded = ndimage.binary_erosion(mask)
 
         # Edge = mask - eroded
         contour_mask = mask & ~eroded
         polygons.append((colour, contours_to_polygons(contour_mask)))
 
-    return polygons
 
     canvas = np.zeros_like(image, dtype=np.uint8)
     for i, poly_data in enumerate(polygons):
         colour, polies = poly_data
         for poly in polies:
             cv2.polylines(canvas, [poly], isClosed=True, color=(int(colour[2]), int(colour[1]), int(colour[0])), thickness=1)
-    Image.fromarray(canvas).save('C:\\Users\\kevin\\OneDrive\\Documents\\Projects\\skribble\\polygon.png')
+    Image.fromarray(canvas).save('polygon.png')
 
+    return polygons
+
+
+def add_palette(image: np.ndarray, palette: list):
+    image = image.copy()
+    height = image.shape[0]
+    size = 20
+    for i, colour in enumerate(palette):
+        x = i % (len(palette) // 2)
+        y = i // (len(palette) // 2)
+        image[((y) * size):((y + 1) * size), x * size: (x + 1) * size] = colour
+    Image.fromarray(image).save('image_palette.png')
+
+
+def quantise(image: Image.Image, mask: np.ndarray, palette: list[tuple], scale: float = .2):
+    width, height = image.size
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    resized_image.save('quantise.png')
+    image = np.array(resized_image)
+    start = time.time()
+    # image_lab = rgb2lab(image / 255.0)
+    image_lab = image / 255.0
+    # palette_lab = rgb2lab(np.array(palette).reshape(-1, 1, 3) / 255.0).reshape(-1, 3)
+    palette_lab = (np.array(palette).reshape(-1, 1, 3) / 255.0).reshape(-1, 3)
+    # Then KDTree in Lab space
+    tree = KDTree(palette_lab)
+    _, idxs = tree.query(image_lab.reshape(-1, 3))
+    
+    matched_colors = np.array(palette)[idxs]
+    print(f'quantise took: {time.time() - start}')
+    return Image.fromarray(matched_colors.reshape(image.shape).astype(palette[0][0].dtype)).resize((width, height), Image.Resampling.NEAREST)
 
 
 
@@ -217,9 +329,12 @@ def create_brush_strokes(image: np.ndarray, palette: list[tuple], height: int, w
     mask = np.array(downscaled)[:, :, 3] == 0
     palette_img = create_palette_image(palette)
     downscaled = remove_alpha(downscaled)
-    downscaled = downscaled.convert('RGB').quantize(palette=palette_img, dither=Image.NONE).convert('RGB')
+    
+    # downscaled = downscaled.quantize(palette=palette_img, dither=Image.NONE).convert('RGB')
+    downscaled = quantise(downscaled, mask, palette)
 
-    downscaled.save('C:\\Users\\kevin\\OneDrive\\Documents\\Projects\\skribble\\resize.png')
+    add_palette(np.array(downscaled), palette)
+    downscaled.save('resize.png')
 
     return image_to_polygons(np.array(downscaled), mask, palette)
 
